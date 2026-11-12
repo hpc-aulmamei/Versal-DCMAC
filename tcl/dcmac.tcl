@@ -1296,9 +1296,118 @@ proc create_hier_cell_gt_wrapper { parentCell nameHier {dual_dcmac 0} } {
 }
 
 ################################################################
+# Runtime rate: 200G / 100G (dynamic_rate = 1)
+#
+# The DCMAC in Dynamic Configuration: configuration 0 is 200GAUI-4 (as the
+# static build), configuration 1 is 100CAUI-4 on the same port(s). Each GT quad
+# gets a second line rate (LR1, 25.78125G NRZ), the TX converters a half mode
+# (two segments a cycle), and the RX converters a mask on segments 2-3, all
+# from one pin, rate_100g, through dcmac_rate_sel. One rate per DCMAC: the IP
+# maps the GT lanes only for configurations that are all PAM4 or all NRZ, so
+# with dual_dcmac both ports switch together. Configurations 2..4 repeat 1
+# (never selected). The DCMAC port registers must follow a switch; see
+# README.md, "Runtime rate". Called by bd_dcmac inside its hierarchy.
+################################################################
+proc _dcmac_dynamic_rate { inline dcmac_index dual_dcmac } {
+    set dc [get_bd_cells dcmac_wrapper/dcmac_${dcmac_index}]
+    set ports [expr {$dual_dcmac ? {0 2} : {0}}]
+
+    # Switching the configuration type resets some port settings; put them back.
+    set keep {}
+    foreach p [list_property $dc CONFIG.*] {
+        if {[regexp {^CONFIG\.(MAC_PORT[0-5]_|GT_REF_CLK|DCMAC_LOCATION|IS_GT_WIZ|USE_AXIS)} $p]
+                && ![string match *.VALUE_SRC $p]} {
+            dict set keep $p [get_property $p $dc]
+        }
+    }
+    set_property CONFIG.DCMAC_CONFIGURATION_TYPE {Dynamic Configuration} $dc
+    foreach {p v} $keep {
+        if {[get_property $p $dc] ne $v} { catch {set_property $p $v $dc} }
+    }
+    foreach n {1 2 3 4} {
+        foreach p {0 1 2 3 4 5} {
+            # the defaults of the other ports (100GAUI-2, PAM4) would make it a MIX configuration
+            set v [expr {$p in $ports ? {100CAUI-4} : {Disabled}}]
+            catch {set_property CONFIG.OTH_PCS_PORT${p}_CONFIG${n}_C0 $v $dc}
+        }
+    }
+    set expect [list CONFIG.DCMAC_CONFIGURATION_TYPE {Dynamic Configuration} \
+        CONFIG.GT_MODE_0 PAM4 CONFIG.GT_MODE_1 NRZ CONFIG.GT_MODE_2 NRZ CONFIG.GT_MODE_3 NRZ \
+        CONFIG.GT_MODE_4 NRZ]
+    foreach p $ports {
+        lappend expect CONFIG.MAC_PORT${p}_CONFIG_C0 200GAUI-4 CONFIG.OTH_PCS_PORT${p}_CONFIG1_C0 100CAUI-4
+    }
+    foreach {p v} $expect {
+        if {[get_property $p $dc] ne $v} {
+            error "dynamic_rate: $dc $p is [get_property $p $dc], not $v"
+        }
+    }
+
+    # Rate select, in sys_clk
+    set rate_100g [_bnd_pin $inline -dir I rate_100g]
+    set block_name dcmac_rate_sel
+    if { [catch {set sel [create_bd_cell -type module -reference $block_name rate_sel]} errmsg] || $sel eq "" } {
+        catch {common::send_gid_msg -ssname BD::TCL -id 2095 -severity "ERROR" "Unable to add referenced block <$block_name>. Please add the files for ${block_name}'s definition into the project."}
+        return 1
+    }
+    connect_bd_net $rate_100g [get_bd_pins rate_sel/rate_100g]
+    connect_bd_net [get_bd_pins bd_clock_reset_ctrl/sys_clk] [get_bd_pins rate_sel/sys_clk]
+
+    # DCMAC configuration and TX converters
+    set dw dcmac_wrapper
+    create_bd_pin -dir I -from 2 -to 0 $dw/config_switch
+    create_bd_pin -dir I $dw/half
+    connect_bd_net [get_bd_pins $dw/config_switch] [get_bd_pins $dc/config_switch]
+    set halves [list $dw/half $dw/axis_to_seg_0/half]
+    if { $dual_dcmac == 1 } { lappend halves $dw/axis_to_seg_1/half }
+    connect_bd_net [get_bd_pins $halves]
+    connect_bd_net [get_bd_pins rate_sel/config_switch] [get_bd_pins $dw/config_switch]
+    connect_bd_net [get_bd_pins rate_sel/half] [get_bd_pins $dw/half]
+
+    # RX: segments 2-3 of each converter masked at 100G (hdl/dcmac_rx_seg_mask.v).
+    # Converter 0 takes DCMAC segments 0-3, converter 1 segments 4-7.
+    foreach i [expr {$dual_dcmac ? {0 1} : {0}}] {
+        set m [create_bd_cell -type module -reference dcmac_rx_seg_mask $dw/rx_seg_mask_$i]
+        connect_bd_net [get_bd_pins $dw/half] [get_bd_pins $m/half]
+        connect_bd_net [get_bd_pins $dw/axis_clk] [get_bd_pins $m/clk]
+        foreach lane {2 3} {
+            set dl [expr {$lane + 4 * $i}]
+            foreach {dfield cfield mfield} {tuser_ena Ena ena tuser_sop Sop sop tuser_eop Eop eop} {
+                set src [get_bd_pins $dc/rx_axis_${dfield}${dl}]
+                set dst [get_bd_pins $dw/seg_to_axis_$i/Seg2UnSeg${cfield}${lane}_in]
+                disconnect_bd_net [get_bd_nets -of_objects $dst] $dst
+                connect_bd_net $src [get_bd_pins $m/${mfield}${lane}_in]
+                connect_bd_net [get_bd_pins $m/${mfield}${lane}] $dst
+            }
+        }
+    }
+
+    # GT line rate 1: 25.78125G NRZ, selected by ch_txrate / ch_rxrate
+    set gw gt_wrapper
+    set r $::dcmac_gt_refclk_mhz
+    set rate_pins {}
+    foreach q [expr {$dual_dcmac ? {0 1} : {0}}] {
+        set gtw [get_bd_cells $gw/gtwiz_versal_$q]
+        set_property CONFIG.INTF0_GT_SETTINGS(LR1_SETTINGS) \
+            "PRESET GTM-NRZ_Ethernet_25G RXPROGDIV_FREQ_VAL 644.531 RX_REFCLK_FREQUENCY $r TXPROGDIV_FREQ_VAL 644.531 TX_REFCLK_FREQUENCY $r" $gtw
+        set lr1 [get_property CONFIG.INTF0_LR1_SETTINGS $gtw]
+        if {![regexp {TX_LINE_RATE 25\.78125\M} $lr1] || ![regexp {TX_PAM_SEL NRZ\M} $lr1]} {
+            error "dynamic_rate: $gtw LR1 is not 25.78125G NRZ"
+        }
+        set pins [get_bd_pins -of $gtw -filter {NAME =~ INTF0_*_ch_txrate || NAME =~ INTF0_*_ch_rxrate}]
+        disconnect_bd_net [get_bd_nets $gw/const_gt_rate_dout] $pins
+        lappend rate_pins {*}$pins
+    }
+    create_bd_pin -dir I -from 7 -to 0 $gw/gt_rate
+    connect_bd_net [get_bd_pins $gw/gt_rate] [get_bd_pins $rate_pins]
+    connect_bd_net [get_bd_pins rate_sel/gt_rate] [get_bd_pins $gw/gt_rate]
+    return 0
+}
+
+################################################################
 # TOP-LEVEL
 ################################################################
-proc bd_dcmac { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board v80} {nclk_f ""} } {
+proc bd_dcmac { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board v80} {nclk_f ""} {dynamic_rate 0} } {
     # Validate dcmac_index
     if {![string is integer -strict $dcmac_index] || !($dcmac_index == 0 || $dcmac_index == 1)} {
         catch {common::send_gid_msg -ssname BD::TCL -id 2092 -severity "ERROR" \
@@ -1315,6 +1424,17 @@ proc bd_dcmac { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board 
     if {![string is integer -strict $dcmac_axil] || !($dcmac_axil == 0 || $dcmac_axil == 1)} {
         catch {common::send_gid_msg -ssname BD::TCL -id 2092 -severity "ERROR" \
             "dcmac_axil (value: $dcmac_axil) must be 0 or 1"}
+        return 1
+    }
+    # Validate dynamic_rate: the port registers must be written on a switch
+    if {![string is integer -strict $dynamic_rate] || !($dynamic_rate == 0 || $dynamic_rate == 1)} {
+        catch {common::send_gid_msg -ssname BD::TCL -id 2092 -severity "ERROR" \
+            "dynamic_rate (value: $dynamic_rate) must be 0 or 1"}
+        return 1
+    }
+    if { $dynamic_rate == 1 && $dcmac_axil != 1 } {
+        catch {common::send_gid_msg -ssname BD::TCL -id 2092 -severity "ERROR" \
+            "dynamic_rate needs dcmac_axil = 1 (the DCMAC port registers change with the rate)"}
         return 1
     }
     # Validate board against the per-board dict from board_config.tcl.
@@ -1603,6 +1723,13 @@ proc bd_dcmac { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board 
     connect_bd_net [get_bd_pins bd_clock_reset_ctrl/rx_chan_flush] [get_bd_pins dcmac_wrapper/rx_channel_flush]
     connect_bd_net [get_bd_pins bd_clock_reset_ctrl/rx_serdes_reset] [get_bd_pins dcmac_wrapper/rx_serdes_reset]
 
+    if { $dynamic_rate == 1 } {
+        if { [_dcmac_dynamic_rate $inline $dcmac_index $dual_dcmac] != 0 } {
+            current_bd_instance $oldCurInst
+            return 1
+        }
+    }
+
     # Restore current instance. In standalone mode, also validate/save/close;
     # in inline mode the caller owns those.
     current_bd_instance $oldCurInst
@@ -1624,7 +1751,7 @@ proc bd_dcmac { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board 
 # it's called). Pins on the new hier are renamed to match SLASH's
 # create_hier_cell_qsfp boundary.
 ################################################################
-proc bd_dcmac_qsfp { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board v80} {nclk_f ""} } {
+proc bd_dcmac_qsfp { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board v80} {nclk_f ""} {dynamic_rate 0} } {
     # Validate dcmac_index / dual_dcmac / dcmac_axil mirroring bd_dcmac.
     foreach { name val } [list dcmac_index $dcmac_index dual_dcmac $dual_dcmac dcmac_axil $dcmac_axil] {
         if {![string is integer -strict $val] || !($val == 0 || $val == 1)} {
@@ -1668,7 +1795,7 @@ proc bd_dcmac_qsfp { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {b
 
     # Build bd_dcmac contents INSIDE the qsfp hier. A BD is open at this
     # point, so bd_dcmac runs in inline mode (uses pins, no lifecycle).
-    set rc [bd_dcmac $qsfp_hier $dcmac_index $dual_dcmac $dcmac_axil $board $nclk_f]
+    set rc [bd_dcmac $qsfp_hier $dcmac_index $dual_dcmac $dcmac_axil $board $nclk_f $dynamic_rate]
     if { $rc != 0 } {
         current_bd_instance $oldCurInst
         return $rc

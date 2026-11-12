@@ -4,3 +4,4 @@ Utility modules for DCMAC integration, including:
 - An AXI Stream to Segmented AXI Stream converter for the DCMAC TX path
 - A Segmented AXI Stream to AXI Stream converter for the DCMAC RX path (note, originally developed by AMD and open-sourced in SLASH: https://github.com/Xilinx/SLASH)
 - A module setting "magic" DCMAC values for 200G operation (taken from the DCMAC example design)
+- For a runtime 200G / 100G rate (`dynamic_rate`, see the top-level README): a half mode of the TX converter (two segments a cycle at 100G), a mask of the RX segments a 100G port does not own, and a rate select that drives the DCMAC configuration, the GT line rate and both converters from one bit

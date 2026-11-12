@@ -7,7 +7,7 @@
 #
 # Usage:
 #   vivado -mode batch -source create_dcmac_example.tcl \
-#          -tclargs <dcmac_index> <dual_dcmac> <dcmac_axil> <wrap_qsfp> <board> <nclk_f>
+#          -tclargs <dcmac_index> <dual_dcmac> <dcmac_axil> <wrap_qsfp> <board> <nclk_f> <dynamic_rate>
 #
 # Project name is fixed to "dcmac_example". All -tclargs are optional and positional. Defaults:
 #   dcmac_index  = 0   (board+index resolves to a DCMAC site via board_config.tcl)
@@ -19,6 +19,7 @@
 #   board        = v80 (board key for the DCMAC site dict in board_config.tcl;
 #                       only "v80" is defined today)
 #   nclk_f       = 391 (DCMAC AXIS clock in MHz; mirrors Coyote's NCLK_F)
+#   dynamic_rate = 0   (1 -> 200G / 100G at runtime, rate_100g pin; needs dcmac_axil = 1)
 ######################################################################################
 
 set dcmac_index  0
@@ -27,6 +28,7 @@ set dcmac_axil   0
 set wrap_qsfp    0
 set board        v80
 set nclk_f       391
+set dynamic_rate 0
 
 if {[llength $argv] >= 1} { set dcmac_index  [lindex $argv 0] }
 if {[llength $argv] >= 2} { set dual_dcmac   [lindex $argv 1] }
@@ -34,6 +36,7 @@ if {[llength $argv] >= 3} { set dcmac_axil   [lindex $argv 2] }
 if {[llength $argv] >= 4} { set wrap_qsfp    [lindex $argv 3] }
 if {[llength $argv] >= 5} { set board        [lindex $argv 4] }
 if {[llength $argv] >= 6} { set nclk_f       [lindex $argv 5] }
+if {[llength $argv] >= 7} { set dynamic_rate [lindex $argv 6] }
 
 set part "xcv80-lsva4737-2MHP-e-S"
 
@@ -49,6 +52,7 @@ puts "INFO: dcmac_axil   = $dcmac_axil"
 puts "INFO: wrap_qsfp    = $wrap_qsfp"
 puts "INFO: board        = $board"
 puts "INFO: nclk_f (MHz) = $nclk_f"
+puts "INFO: dynamic_rate = $dynamic_rate"
 puts "INFO: pkg_root     = $pkg_root"
 puts "INFO: build_dir    = $build_dir"
 
@@ -75,10 +79,10 @@ source [file join $pkg_root "tcl" "dcmac.tcl"]
 
 if { $wrap_qsfp == 1 } {
     puts "Going via the QSFP hierarchy flow"
-    bd_dcmac_qsfp "" $dcmac_index $dual_dcmac $dcmac_axil $board
+    if { [bd_dcmac_qsfp "" $dcmac_index $dual_dcmac $dcmac_axil $board $nclk_f $dynamic_rate] != 0 } { error "bd_dcmac_qsfp failed" }
 } else {
     puts "Going via the flat hierarchy flow"
-    bd_dcmac      "" $dcmac_index $dual_dcmac $dcmac_axil $board
+    if { [bd_dcmac      "" $dcmac_index $dual_dcmac $dcmac_axil $board $nclk_f $dynamic_rate] != 0 } { error "bd_dcmac failed" }
 }
 
 set design_name "dcmac_${dcmac_index}_versal_axis_wrapper"
