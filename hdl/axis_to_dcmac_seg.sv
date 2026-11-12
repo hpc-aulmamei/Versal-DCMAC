@@ -31,6 +31,10 @@ module axis_to_dcmac_seg (
     input  logic         aclk,
     input  logic         aresetn,
 
+    // 100G port (2 segments a cycle): each 512-bit beat goes out as two
+    // 256-bit halves on segments 0 and 1. aclk domain, change only while idle.
+    input  logic         half,
+
     // AXI Stream input
     input  logic [511:0] s_axis_tdata,
     input  logic [63:0]  s_axis_tkeep,
@@ -110,15 +114,44 @@ module axis_to_dcmac_seg (
         endcase
     endfunction
 
+    // Half mode: phase 0 sends bytes 0..31 of the beat, phase 1 bytes 32..63.
+    // A last beat with nothing in the upper half ends in phase 0.
+    logic phase;
+    logic beat_done;
+    assign beat_done = !half || phase || (s_axis_tlast && !s_axis_tkeep[32]);
+
+    always_ff @(posedge aclk) begin
+        if (aresetn == 1'b0 || !half) begin
+            phase <= 1'b0;
+        end else if (s_axis_tvalid && tx_ready) begin
+            phase <= !beat_done;
+        end
+    end
+
     // Flow control
     assign tx_valid      = s_axis_tvalid;
-    assign s_axis_tready = tx_ready;
-    
+    assign s_axis_tready = tx_ready && beat_done;
+
     // Data routing
-    assign tx_data_0 = s_axis_tdata[127:0];
-    assign tx_data_1 = s_axis_tdata[255:128];
-    assign tx_data_2 = s_axis_tdata[383:256];
-    assign tx_data_3 = s_axis_tdata[511:384];
+    logic [511:0] seg_data;
+    logic [63:0]  seg_keep;
+    logic         seg_last;     // this cycle carries the end of the packet
+    always_comb begin
+        if (half) begin
+            seg_data = {256'd0, phase ? s_axis_tdata[511:256] : s_axis_tdata[255:0]};
+            seg_keep = {32'd0, phase ? s_axis_tkeep[63:32] : s_axis_tkeep[31:0]};
+            seg_last = s_axis_tlast && beat_done;
+        end else begin
+            seg_data = s_axis_tdata;
+            seg_keep = s_axis_tkeep;
+            seg_last = s_axis_tlast;
+        end
+    end
+
+    assign tx_data_0 = seg_data[127:0];
+    assign tx_data_1 = seg_data[255:128];
+    assign tx_data_2 = seg_data[383:256];
+    assign tx_data_3 = seg_data[511:384];
 
     // Tie off error
     assign tx_err_0 = 1'b0;
@@ -135,27 +168,27 @@ module axis_to_dcmac_seg (
 
         if (s_axis_tvalid) begin
             // Determine enabled segments
-            if (s_axis_tlast == 1'b0) begin
-                // Not the last beat; all segments enabled
+            if (seg_last == 1'b0) begin
+                // Not the last beat; all segments enabled (two in half mode)
                 tx_ena_0 = 1'b1;
                 tx_ena_1 = 1'b1;
-                tx_ena_2 = 1'b1;
-                tx_ena_3 = 1'b1;
+                tx_ena_2 = !half;
+                tx_ena_3 = !half;
             end else begin
                 // Last beat; enabled of a segment based on whether the LSB of that segment's keep is 1
-                tx_ena_0 = s_axis_tkeep[0];
-                tx_ena_1 = s_axis_tkeep[16];
-                tx_ena_2 = s_axis_tkeep[32];
-                tx_ena_3 = s_axis_tkeep[48];
+                tx_ena_0 = seg_keep[0];
+                tx_ena_1 = seg_keep[16];
+                tx_ena_2 = seg_keep[32];
+                tx_ena_3 = seg_keep[48];
             end
 
             // Start of Packet (SOP)
-            if (is_next_beat_first) begin
+            if (is_next_beat_first && !phase) begin
                 tx_sop_0 = 1'b1;
             end
 
             // 3. End of Packet (EOP); based on the highest enabled segment during the last beat
-            if (s_axis_tlast) begin
+            if (seg_last) begin
                 if      (tx_ena_3) tx_eop_3 = 1'b1;
                 else if (tx_ena_2) tx_eop_2 = 1'b1;
                 else if (tx_ena_1) tx_eop_1 = 1'b1;
@@ -163,11 +196,11 @@ module axis_to_dcmac_seg (
             end
 
             // mty calculation, based on the tkeep, and only relavant for the last beat
-            if (s_axis_tlast) begin
-                if (tx_eop_0) tx_mty_0 = get_mty(s_axis_tkeep[15:0]);
-                if (tx_eop_1) tx_mty_1 = get_mty(s_axis_tkeep[31:16]);
-                if (tx_eop_2) tx_mty_2 = get_mty(s_axis_tkeep[47:32]);
-                if (tx_eop_3) tx_mty_3 = get_mty(s_axis_tkeep[63:48]);
+            if (seg_last) begin
+                if (tx_eop_0) tx_mty_0 = get_mty(seg_keep[15:0]);
+                if (tx_eop_1) tx_mty_1 = get_mty(seg_keep[31:16]);
+                if (tx_eop_2) tx_mty_2 = get_mty(seg_keep[47:32]);
+                if (tx_eop_3) tx_mty_3 = get_mty(seg_keep[63:48]);
             end
         end
     end

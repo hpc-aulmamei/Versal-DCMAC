@@ -37,6 +37,9 @@ module axis_to_dcmac_seg_wrapper (
     (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 aresetn RST" *)
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
     input wire aresetn,
+    // 100G port: two segments a cycle (any clock, changed only while idle;
+    // left unconnected it is 0, the 200G behaviour)
+    input wire half,
 
     // AXI Stream Input
     (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 s_axis TDATA" *)  input  wire [511:0] s_axis_tdata,
@@ -83,9 +86,14 @@ module axis_to_dcmac_seg_wrapper (
     input  wire         tx_ready
 );
 
+    wire half_s;
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .SIM_ASSERT_CHK(0), .SRC_INPUT_REG(0)) inst_half_cdc (
+        .src_clk(1'b0), .src_in(half), .dest_clk(aclk), .dest_out(half_s));
+
     axis_to_dcmac_seg inst_axis_to_dcmac_seg (
         .aclk           (aclk),
         .aresetn        (aresetn),
+        .half           (half_s),
 
         .s_axis_tdata   (s_axis_tdata),
         .s_axis_tkeep   (s_axis_tkeep),
