@@ -1706,7 +1706,14 @@ proc bd_dcmac { parentCell {dcmac_index 0} {dual_dcmac 0} {dcmac_axil 0} {board 
         }
     }
     connect_bd_net [get_bd_pins bd_clock_reset_ctrl/dcmac_core_clk] [get_bd_pins dcmac_wrapper/core_clk]
-    connect_bd_net [get_bd_pins bd_clock_reset_ctrl/sys_clk] [get_bd_pins dcmac_wrapper/ts_axil_clk] [get_bd_pins gt_wrapper/gtwiz_freerun_clk]
+    connect_bd_net [get_bd_pins bd_clock_reset_ctrl/sys_clk] [get_bd_pins dcmac_wrapper/ts_axil_clk]
+    # The GT wizard's free-running clock (its reset helper and the quads' APB
+    # interface) comes from the boundary's aclk, not from sys_clk: sys_clk is
+    # made from the ODIV2 of the reference clock buffer, inside a quad of this
+    # hierarchy. On a V80 with this hierarchy in a DFX region, the quad holding
+    # the reference clock pin did not acknowledge the NPI shutdown of a partial
+    # load (PCSR_STATUS bit 18), and its GT did not leave reset afterwards.
+    connect_bd_net $aclk [get_bd_pins gt_wrapper/gtwiz_freerun_clk]
 
     if { $dcmac_axil == 1 } {
         set sc [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 s_axi_smartconnect]
