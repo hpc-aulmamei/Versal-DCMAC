@@ -1355,7 +1355,8 @@ proc _dcmac_dynamic_rate { inline dcmac_index dual_dcmac } {
         }
     }
 
-    # Rate select, in sys_clk
+    # Rate select: DCMAC and converter selects in sys_clk, GT line rate in the
+    # GT wizard's free-running clock
     set rate_100g [_bnd_pin $inline -dir I rate_100g]
     set block_name dcmac_rate_sel
     if { [catch {set sel [create_bd_cell -type module -reference $block_name rate_sel]} errmsg] || $sel eq "" } {
@@ -1364,6 +1365,7 @@ proc _dcmac_dynamic_rate { inline dcmac_index dual_dcmac } {
     }
     connect_bd_net $rate_100g [get_bd_pins rate_sel/rate_100g]
     connect_bd_net [get_bd_pins bd_clock_reset_ctrl/sys_clk] [get_bd_pins rate_sel/sys_clk]
+    connect_bd_net [get_bd_pins gt_wrapper/gtwiz_freerun_clk] [get_bd_pins rate_sel/gt_clk]
 
     # DCMAC configuration and TX converters
     set dw dcmac_wrapper

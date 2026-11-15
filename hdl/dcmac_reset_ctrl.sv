@@ -28,7 +28,9 @@
 /// State machine for driving resets of the DCMAC, GT transceivers, and AXIS segmenters.
 ///
 /// Clock domains:
-///   sys_clk        - Free-running clock; also drives gtwiz_freerunning_clk
+///   sys_clk        - Free-running clock of this controller. The GT wizard runs on
+///                    its own free-running clock (tcl/dcmac.tcl: the user aclk),
+///                    so its reset-done inputs are synchronized here.
 ///   dcmac_core_clk - DCMAC Core Clock (780 MHz)
 ///   dcmac_axis_clk - DCMAC AXIS Clock (391 MHz)
 ///
@@ -58,7 +60,8 @@ module dcmac_reset_ctrl #(
     input  logic        dcmac_axis_clk,
     input  logic        async_resetn,
 
-    // GT transceiver reset — active-high, sys_clk domain, no CDC required
+    // GT transceiver reset, active-high, sys_clk domain (the GT wizard
+    // synchronizes it); reset done from the GT wizard, any clock
     output logic        gt_reset,
     input  logic        gt_reset_done_tx,
     input  logic        gt_reset_done_rx,
@@ -132,13 +135,29 @@ xpm_cdc_async_rst #(
     .dest_arst (sys_resetn)
 );
 
+// GT reset done comes from the GT wizard's free-running clock domain
+logic gt_reset_done_tx_s;
+logic gt_reset_done_rx_s;
+xpm_cdc_array_single #(
+    .DEST_SYNC_FF   (4),
+    .INIT_SYNC_FF   (0),
+    .SIM_ASSERT_CHK (0),
+    .SRC_INPUT_REG  (0),
+    .WIDTH          (2)
+) u_cdc_gt_reset_done (
+    .src_clk  (1'b0),
+    .src_in   ({gt_reset_done_rx, gt_reset_done_tx}),
+    .dest_clk (sys_clk),
+    .dest_out ({gt_reset_done_rx_s, gt_reset_done_tx_s})
+);
+
 always_ff @(posedge sys_clk) begin
     if (sys_resetn == 1'b0 || !gt_done_valid) begin
         gt_reset_done_tx_r <= 1'b0;
         gt_reset_done_rx_r <= 1'b0;
     end else begin
-        if (gt_reset_done_tx) gt_reset_done_tx_r <= 1'b1;
-        if (gt_reset_done_rx) gt_reset_done_rx_r <= 1'b1;
+        if (gt_reset_done_tx_s) gt_reset_done_tx_r <= 1'b1;
+        if (gt_reset_done_rx_s) gt_reset_done_rx_r <= 1'b1;
     end
 end
 
